@@ -1,0 +1,11 @@
+[Unit]
+Description=Confer worker health listener
+
+[Socket]
+ListenStream=8080
+Accept=yes
+NoDelay=yes
+MaxConnections=64
+
+[Install]
+WantedBy=sockets.target

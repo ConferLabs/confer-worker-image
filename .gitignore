@@ -1,0 +1,12 @@
+mkosi.cache/
+mkosi.output/
+.m2/
+.gcp-stage/
+*.raw
+*.qcow2
+*.tar.gz
+*.efi
+*.vmlinuz
+*.initrd
+.skeleton-hash
+__pycache__/

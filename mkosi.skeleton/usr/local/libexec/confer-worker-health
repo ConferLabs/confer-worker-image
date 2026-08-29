@@ -1,0 +1,29 @@
+#!/bin/bash
+set -euo pipefail
+
+respond_to_health_request() {
+  local ready_path=$1
+  local line
+  local line_number
+
+  for ((line_number = 0; line_number < 32; line_number++)); do
+    if ! IFS= read -r -t 1 line; then
+      break
+    fi
+    if [[ -z "$line" || "$line" == $'\r' ]]; then
+      break
+    fi
+  done
+
+  if [[ -e "$ready_path" ]]; then
+    /usr/bin/printf \
+      'HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 3\r\nContent-Type: text/plain\r\n\r\nok\n'
+  else
+    /usr/bin/printf \
+      'HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'
+  fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  respond_to_health_request /run/confer/ready
+fi

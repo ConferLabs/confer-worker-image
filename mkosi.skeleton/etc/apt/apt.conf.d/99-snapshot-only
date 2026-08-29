@@ -1,0 +1,5 @@
+Acquire::Check-Valid-Until "false";
+Acquire::Max-ValidTime "0";
+APT::Get::Update::SourceListWarnings::NonFreeFirmware "false";
+Dir::Etc::sourcelist "sources.list";
+Dir::Etc::sourceparts "-";

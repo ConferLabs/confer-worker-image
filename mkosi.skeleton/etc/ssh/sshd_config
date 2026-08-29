@@ -1,0 +1,42 @@
+HostKey /run/confer/ssh_host_ed25519_key
+HostKeyAlgorithms ssh-ed25519
+
+AllowUsers confer-job
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PubkeyAcceptedAlgorithms ssh-ed25519
+AuthorizedKeysFile /run/confer/authorized_keys
+
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+UsePAM no
+
+DisableForwarding yes
+AllowAgentForwarding no
+AllowStreamLocalForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+PermitOpen none
+PermitListen none
+PermitTunnel no
+PermitTTY no
+PermitUserEnvironment no
+PermitUserRC no
+SetEnv PATH=/var/lib/confer/workspace/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+LoginGraceTime 60
+MaxAuthTries 2
+MaxSessions 1
+ClientAliveInterval 30
+ClientAliveCountMax 3
+Compression no
+TCPKeepAlive no
+UseDNS no
+
+PrintLastLog no
+PrintMotd no
+LogLevel INFO
+SyslogFacility AUTHPRIV
+Subsystem sftp internal-sftp

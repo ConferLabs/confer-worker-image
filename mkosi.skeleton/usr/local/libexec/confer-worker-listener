@@ -1,0 +1,373 @@
+#!/usr/bin/python3
+
+import base64
+import binascii
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import secrets
+import socket
+import struct
+import sys
+import time
+
+
+READY_PATH            = Path("/run/confer/ready")
+LISTENER_STARTED_PATH = Path("/run/confer/listener-started")
+INSTANCE_ID_PATH      = Path("/run/confer/instance-id")
+HOST_KEY_PATH         = Path("/run/confer/ssh_host_ed25519_key.pub")
+AUTHORIZED_KEYS_PATH  = Path("/run/confer/authorized_keys")
+MANIFEST_PATH         = Path("/run/confer/release-manifest.json")
+MANIFEST_BUNDLE_PATH  = Path("/run/confer/release-manifest.bundle.json")
+REPORTS_PATH          = Path("/sys/kernel/config/tsm/report")
+SSHD_PATH             = "/usr/sbin/sshd"
+SSHD_CONFIG           = "/etc/ssh/sshd_config"
+
+VERSION                           = 4
+REPORT_DOMAIN                     = b"confer.worker.ssh.prelude.v4"
+ED25519_KEY_PREFIX                = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
+ED25519_KEY_BYTES                 = len(ED25519_KEY_PREFIX) + 32
+CHALLENGE_BYTES                   = 32
+MAX_REQUEST_BYTES                 = 4 * 1024
+MAX_QUOTE_BYTES                   = 64 * 1024
+MAX_RELEASE_EVIDENCE_BYTES        = 32 * 1024
+MAX_ATTESTATION_BYTES             = 256 * 1024
+REQUEST_TIMEOUT_SECONDS           = 5
+RESPONSE_TIMEOUT_SECONDS          = 5
+ADMISSION_CUTOFF_EARLIEST_SECONDS = 18 * 60 * 60
+ADMISSION_CUTOFF_WINDOW_SECONDS   = 2 * 60 * 60
+
+
+class WorkerError(Exception):
+  pass
+
+
+class AdmissionClosed(Exception):
+  pass
+
+
+def create_reservation_acknowledgement(instance_id: str) -> bytes:
+  instance_id = instance_id.removesuffix("\n")
+
+  if not instance_id or not instance_id.isascii() or not instance_id.isdigit():
+    raise WorkerError("Instance ID is invalid")
+
+  numeric_id = int(instance_id)
+
+  if numeric_id > 0xffffffffffffffff:
+    raise WorkerError("Instance ID is invalid")
+
+  return f"CONFER-WORKER-RESERVED 1 {numeric_id}\n".encode("ascii")
+
+
+def parse_boot_age(uptime: str) -> float:
+  try:
+    seconds = float(uptime.split()[0])
+  except (IndexError, ValueError) as error:
+    raise WorkerError("System uptime is invalid") from error
+  if not math.isfinite(seconds) or seconds < 0:
+    raise WorkerError("System uptime is invalid")
+  return seconds
+
+
+def create_admission_cutoff_boot_age() -> int:
+  return (ADMISSION_CUTOFF_EARLIEST_SECONDS + secrets.randbelow(ADMISSION_CUTOFF_WINDOW_SECONDS))
+
+def claim_listener_start(path: Path) -> None:
+  try:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+  except FileExistsError as error:
+    raise WorkerError("Worker listener has already started") from error
+  with os.fdopen(descriptor, "wb") as marker:
+    marker.write(b"started\n")
+
+
+def publish_ready(path: Path) -> None:
+  descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+  with os.fdopen(descriptor, "wb") as marker:
+    marker.write(b"ready\n")
+
+def withdraw_ready(path: Path) -> None:
+  path.unlink(missing_ok=True)
+
+def accept_until(listener    : socket.socket,
+                 ready_path : Path,
+                 deadline   : float,
+                 monotonic=time.monotonic) -> socket.socket:
+  remaining = deadline - monotonic()
+
+  if remaining <= 0:
+    raise AdmissionClosed()
+  
+  listener.settimeout(remaining)
+  publish_ready(ready_path)
+
+  try:
+    try:
+      connection, _address = listener.accept()
+    except TimeoutError as error:
+      raise AdmissionClosed() from error
+  finally:
+    listener.close()
+    withdraw_ready(ready_path)
+
+  return connection
+
+def read_exact_before(connection : socket.socket,
+                      size       : int,
+                      deadline   : float,
+                      description: str) -> bytes:
+  received = bytearray()
+  while len(received) < size:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+      raise WorkerError(f"{description} timed out")
+    connection.settimeout(remaining)
+    try:
+      chunk = connection.recv(size - len(received))
+    except TimeoutError as error:
+      raise WorkerError(f"{description} timed out") from error
+    if not chunk:
+      raise WorkerError(f"{description} ended early")
+    received.extend(chunk)
+  return bytes(received)
+
+
+def send_acknowledgement(connection: socket.socket, acknowledgement: bytes) -> None:
+  connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+  connection.sendall(acknowledgement)
+
+
+def receive_attestation_request(connection: socket.socket) -> bytes:
+  deadline       = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+  encoded_length = read_exact_before(connection, 4, deadline, "Attestation request length")
+  length         = struct.unpack(">I", encoded_length)[0]
+
+  if not 0 < length <= MAX_REQUEST_BYTES:
+    raise WorkerError("Attestation request size is invalid")
+  
+  request = read_exact_before(connection, length, deadline, "Attestation request")
+
+  try:
+    request.decode("utf-8")
+  except UnicodeDecodeError as error:
+    raise WorkerError("Attestation request is not UTF-8") from error
+  
+  return request
+
+def reject_duplicate_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+  result = {}
+
+  for key, value in pairs:
+    if key in result:
+      raise WorkerError("Attestation request has duplicate fields")
+    
+    result[key] = value
+
+  return result
+
+def encode_urlsafe(value: bytes) -> str:
+  return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+def decode_challenge(value: object) -> bytes:
+  if not isinstance(value, str) or "=" in value:
+    raise WorkerError("Challenge is invalid")
+  
+  try:
+    encoded   = value.encode("ascii")
+    padding   = b"=" * ((4 - len(encoded) % 4) % 4)
+    challenge = base64.b64decode(encoded + padding, altchars=b"-_", validate=True)
+  except (UnicodeEncodeError, binascii.Error, ValueError) as error: 
+    raise WorkerError("Challenge is invalid") from error
+  
+  if len(challenge) != CHALLENGE_BYTES or encode_urlsafe(challenge) != value:
+    raise WorkerError("Challenge is invalid")
+  
+  return challenge
+
+def validate_public_key(key_blob: bytes) -> None:
+  if (len(key_blob) != ED25519_KEY_BYTES or not key_blob.startswith(ED25519_KEY_PREFIX)):
+    raise WorkerError("SSH key is invalid")
+
+def format_public_key(key_blob: bytes) -> str:
+  return f"ssh-ed25519 {base64.b64encode(key_blob).decode('ascii')}"
+
+
+def decode_client_key(value: object) -> bytes:
+  prefix = "ssh-ed25519 "
+
+  if not isinstance(value, str) or not value.startswith(prefix):
+    raise WorkerError("Client key is invalid")
+  
+  try:
+    key_blob = base64.b64decode(value[len(prefix):].encode("ascii"), validate=True)
+  except (UnicodeEncodeError, binascii.Error, ValueError) as error:
+    raise WorkerError("Client key is invalid") from error
+  
+  validate_public_key(key_blob)
+
+  if format_public_key(key_blob) != value:
+    raise WorkerError("Client key is invalid")
+  
+  return key_blob
+
+
+def parse_request(encoded: bytes) -> tuple[bytes, bytes]:
+  if not encoded or len(encoded) > MAX_REQUEST_BYTES:
+    raise WorkerError("Attestation request size is invalid")
+  try:
+    request = json.loads(encoded.decode("utf-8"), object_pairs_hook=reject_duplicate_fields)
+  except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise WorkerError("Attestation request is invalid") from error
+
+  if not isinstance(request, dict) or set(request) != {"version", "challenge", "clientKey"}:
+    raise WorkerError("Attestation request fields are invalid")
+  
+  if type(request["version"]) is not int or request["version"] != VERSION:
+    raise WorkerError("Attestation request version is invalid")
+  
+  return decode_challenge(request["challenge"]), decode_client_key(request["clientKey"])
+
+def write_authorized_key(path: Path, key_blob: bytes) -> None:
+  authorized_key = f"restrict {format_public_key(key_blob)}\n".encode("ascii")
+  descriptor     = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+
+  with os.fdopen(descriptor, "wb") as output: 
+    output.write(authorized_key)
+    output.flush()
+    os.fsync(output.fileno())
+    os.fchmod(output.fileno(), 0o444)
+
+
+def read_host_key(path: Path) -> tuple[str, bytes]:
+  fields = path.read_text(encoding="ascii").split()
+
+  if len(fields) < 2 or fields[0] != "ssh-ed25519":
+    raise WorkerError("Host key is invalid")
+  
+  try:
+    key_blob = base64.b64decode(fields[1], validate=True)
+  except binascii.Error as error:
+    raise WorkerError("Host key is invalid") from error
+  
+  validate_public_key(key_blob)
+
+  if base64.b64encode(key_blob).decode("ascii") != fields[1]:
+    raise WorkerError("Host key is invalid")
+  
+  return format_public_key(key_blob), key_blob
+
+
+def read_release_evidence(path: Path) -> str:
+  encoded = path.read_bytes()
+  if not encoded or len(encoded) > MAX_RELEASE_EVIDENCE_BYTES:
+    raise WorkerError("Worker release evidence size is invalid")
+  try:
+    return encoded.decode("utf-8")
+  except UnicodeDecodeError as error:
+    raise WorkerError("Worker release evidence is not UTF-8") from error
+
+
+def create_quote(report_data: bytes, reports_path: Path | None = None) -> bytes:
+  if reports_path is None:
+    reports_path = REPORTS_PATH
+  entry = reports_path / f"confer-{secrets.token_hex(16)}"
+  entry.mkdir(mode=0o700)
+  try:
+    (entry / "inblob").write_bytes(report_data)
+    quote = (entry / "outblob").read_bytes()
+    if not quote or len(quote) > MAX_QUOTE_BYTES:
+      raise WorkerError("TDX quote size is invalid")
+    return quote
+  finally:
+    entry.rmdir()
+
+
+def create_attestation(request: bytes) -> bytes:
+  challenge, client_key_blob = parse_request(request)
+  write_authorized_key(AUTHORIZED_KEYS_PATH, client_key_blob)
+
+  host_key, host_key_blob = read_host_key(HOST_KEY_PATH)
+
+  report_data = hashlib.sha512(REPORT_DOMAIN + host_key_blob + client_key_blob + challenge).digest()
+
+  document = {
+      "version": VERSION,
+      "platform": "TDX",
+      "protocol": "SSH-2.0",
+      "challenge": encode_urlsafe(challenge),
+      "hostKey": host_key,
+      "clientKey": format_public_key(client_key_blob),
+      "quote": encode_urlsafe(create_quote(report_data)),
+      "manifest": read_release_evidence(MANIFEST_PATH),
+      "manifestBundle": read_release_evidence(MANIFEST_BUNDLE_PATH),
+  }
+
+  encoded = json.dumps(document, separators=(",", ":")).encode("utf-8")
+
+  if len(encoded) > MAX_ATTESTATION_BYTES:
+    raise WorkerError("Attestation response size is invalid")
+  
+  return encoded
+
+
+def send_attestation(connection: socket.socket, attestation: bytes) -> None:
+  connection.settimeout(RESPONSE_TIMEOUT_SECONDS)
+  connection.sendall(struct.pack(">I", len(attestation)) + attestation)
+  connection.settimeout(None)
+
+
+def execute_sshd(connection: socket.socket) -> None:
+  descriptor = connection.fileno()
+  os.dup2(descriptor, 0, inheritable=True)
+  os.dup2(descriptor, 1, inheritable=True)
+  if descriptor not in (0, 1):
+    connection.close()
+  os.execv(SSHD_PATH, [SSHD_PATH, "-i", "-e", "-f", SSHD_CONFIG])
+
+
+def serve() -> None:
+  claim_listener_start(LISTENER_STARTED_PATH)
+
+  acknowledgement      = create_reservation_acknowledgement(INSTANCE_ID_PATH.read_text(encoding="ascii"))
+  admission_cutoff_age = create_admission_cutoff_boot_age()
+  current_boot_age     = parse_boot_age(Path("/proc/uptime").read_text(encoding="ascii"))
+  admission_deadline   = (time.monotonic() + max(0, admission_cutoff_age - current_boot_age))
+
+  listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+  try:
+    listener.bind(("0.0.0.0", 22))
+    listener.listen()
+
+    connection = accept_until(listener, READY_PATH, admission_deadline)
+  finally:
+    listener.close()
+    withdraw_ready(READY_PATH)
+
+  with connection:
+    send_acknowledgement(connection, acknowledgement)
+
+    request  = receive_attestation_request(connection)
+    response = create_attestation(request)
+
+    send_attestation(connection, response)
+    execute_sshd(connection)
+
+
+def main() -> int:
+  try:
+    serve()
+  except AdmissionClosed:
+    sys.stderr.write("confer-worker-listener: admission cutoff reached\n")
+    return 0
+  except (WorkerError, OSError, ValueError) as error:
+    sys.stderr.write(f"confer-worker-listener: {error}\n")
+    return 1
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

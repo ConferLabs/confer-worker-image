@@ -1,0 +1,32 @@
+#!/bin/bash
+set -euo pipefail
+
+install -d -m 0711 /var/lib/confer
+
+useradd \
+  --system \
+  --user-group \
+  --home-dir /var/lib/confer/workspace \
+  --shell /bin/bash \
+  --password '*' \
+  confer-job
+
+/usr/bin/python3 -m pip install \
+  --break-system-packages \
+  --no-deps \
+  --only-binary=:all: \
+  --require-hashes \
+    --requirement /usr/local/share/confer/document-core-requirements.txt
+
+systemctl enable systemd-networkd.service
+systemctl enable systemd-networkd-wait-online.service
+systemctl enable systemd-timesyncd.service
+systemctl enable nftables.service
+systemctl enable confer-worker-config.service
+systemctl enable confer-worker.service
+systemctl enable confer-worker-health.socket
+systemctl mask ssh.service ssh.socket
+
+truncate --size 0 /etc/machine-id
+rm -f /var/lib/dbus/machine-id
+ln -s /etc/machine-id /var/lib/dbus/machine-id

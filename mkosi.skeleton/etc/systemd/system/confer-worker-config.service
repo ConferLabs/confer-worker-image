@@ -1,0 +1,43 @@
+[Unit]
+Description=Initialize measured worker runtime
+After=network-online.target nftables.service
+Wants=network-online.target
+Requires=nftables.service
+Before=confer-worker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+RuntimeDirectory=confer
+RuntimeDirectoryMode=0711
+ExecStart=/usr/local/libexec/confer-worker-config
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+DevicePolicy=closed
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ReadWritePaths=/run/confer
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TasksMax=32
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

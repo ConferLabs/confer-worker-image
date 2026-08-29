@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ ! -f "$BUILDROOT/etc/apt/sources.list" ]; then
+  echo "snapshot sources.list is missing" >&2
+  exit 1
+fi
+
+if ! grep -q "snapshot.ubuntu.com" "$BUILDROOT/etc/apt/sources.list"; then
+  echo "live Ubuntu repository is not allowed" >&2
+  exit 1
+fi
+
+rm -f "$BUILDROOT"/etc/apt/sources.list.d/*.list
+rm -f "$BUILDROOT"/etc/apt/sources.list.d/*.sources
+

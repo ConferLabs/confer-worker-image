@@ -1,0 +1,101 @@
+#!/bin/bash
+set -euo pipefail
+
+get_metadata() {
+  /usr/bin/curl \
+    --fail \
+    --silent \
+    --show-error \
+    --connect-timeout 2 \
+    --max-time 5 \
+    --header "Metadata-Flavor: Google" \
+    "http://169.254.169.254/computeMetadata/v1/$1"
+}
+
+get_metadata_file() {
+  local metadata_path=$1
+  local destination=$2
+
+  /usr/bin/curl \
+    --fail \
+    --silent \
+    --show-error \
+    --connect-timeout 2 \
+    --max-time 5 \
+    --header "Metadata-Flavor: Google" \
+    --output "$destination" \
+    "http://169.254.169.254/computeMetadata/v1/$metadata_path"
+}
+
+require_instance_id() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+fetch_release_evidence() {
+  local runtime_directory=$1
+  local metadata_key=$2
+  local filename=$3
+  local destination=$runtime_directory/$filename
+  local temporary_file
+  local bytes
+
+  temporary_file=$(/usr/bin/mktemp "$destination.XXXXXX")
+  if ! get_metadata_file \
+      "instance/attributes/$metadata_key" \
+      "$temporary_file"; then
+    /bin/rm -f "$temporary_file"
+    return 1
+  fi
+  bytes=$(/usr/bin/wc -c < "$temporary_file")
+  if ((bytes == 0 || bytes > 32 * 1024)); then
+    /bin/rm -f "$temporary_file"
+    return 1
+  fi
+  if ! /usr/bin/python3 -c \
+      'from pathlib import Path; import sys; Path(sys.argv[1]).read_text(encoding="utf-8")' \
+      "$temporary_file"; then
+    /bin/rm -f "$temporary_file"
+    return 1
+  fi
+  /bin/chmod 0444 "$temporary_file"
+  /bin/mv "$temporary_file" "$destination"
+}
+
+configure_worker() {
+  local runtime_directory=$1
+  local cleanup
+  local instance_id
+  local temporary_instance_id
+
+  instance_id=$(get_metadata "instance/id")
+  require_instance_id "$instance_id"
+
+  /usr/bin/ssh-keygen \
+    -q \
+    -t ed25519 \
+    -N '' \
+    -f "$runtime_directory/ssh_host_ed25519_key"
+  /bin/chmod 0600 "$runtime_directory/ssh_host_ed25519_key"
+  /bin/chmod 0644 "$runtime_directory/ssh_host_ed25519_key.pub"
+
+  temporary_instance_id=$(/usr/bin/mktemp "$runtime_directory/instance-id.XXXXXX")
+  printf -v cleanup '/bin/rm -f %q' "$temporary_instance_id"
+  trap "$cleanup" EXIT
+
+  /usr/bin/printf '%s\n' "$instance_id" > "$temporary_instance_id"
+  /bin/chmod 0444 "$temporary_instance_id"
+  /bin/mv "$temporary_instance_id" "$runtime_directory/instance-id"
+
+  fetch_release_evidence \
+    "$runtime_directory" \
+    confer-worker-release-manifest \
+    release-manifest.json
+  fetch_release_evidence \
+    "$runtime_directory" \
+    confer-worker-release-manifest-bundle \
+    release-manifest.bundle.json
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  configure_worker /run/confer
+fi

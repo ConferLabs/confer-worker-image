@@ -1,0 +1,154 @@
+name: Release worker image
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: Type PRODUCTION to release a stable version
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-image-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Select the release channel
+        env:
+          CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^ImageVersion=//p' mkosi.conf)
+
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z][0-9A-Za-z.-]*$ ]]; then
+            echo "FULCIO_URL=https://fulcio.sigstage.dev" >> "$GITHUB_ENV"
+            echo "REKOR_URL=https://rekor.sigstage.dev" >> "$GITHUB_ENV"
+            echo "STAGING=true" >> "$GITHUB_ENV"
+          elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ "$CONFIRM_PRODUCTION" != "PRODUCTION" ]]; then
+              echo "Production releases require confirm_production=PRODUCTION" >&2
+              exit 1
+            fi
+            tag="v${version}"
+            if [[ "$RELEASE_REF" != "refs/tags/$tag" \
+                || "$(git rev-list -n 1 "$tag")" != "$(git rev-parse HEAD)" ]]; then
+              echo "Production releases must run from the matching $tag" >&2
+              exit 1
+            fi
+            echo "FULCIO_URL=https://fulcio.sigstore.dev" >> "$GITHUB_ENV"
+            echo "REKOR_URL=https://rekor.sigstore.dev" >> "$GITHUB_ENV"
+            echo "STAGING=false" >> "$GITHUB_ENV"
+          else
+            echo "Invalid ImageVersion in mkosi.conf: $version" >&2
+            exit 1
+          fi
+
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes nftables openssh-client openssh-server jq
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+
+      - name: Test
+        run: |
+          nix develop --command make test
+          if ! getent passwd confer-job >/dev/null; then
+            sudo useradd --system --no-create-home --home-dir /tmp --shell /bin/bash --password '*' confer-job
+          fi
+          sudo make test-linux-policy
+
+      - name: Prepare the release
+        run: nix develop --command make prepare-release
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - id: sigstore-auth
+        name: Authenticate as the worker release signer
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          create_credentials_file: false
+          export_environment_variables: false
+          id_token_audience: sigstore
+          id_token_include_email: true
+          service_account: worker-image-releases@conferlabs.iam.gserviceaccount.com
+          token_format: id_token
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Sign the manifest
+        env:
+          IDENTITY_TOKEN: ${{ steps.sigstore-auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          arguments=(
+            --yes
+            --new-bundle-format
+            --rekor-url="$REKOR_URL"
+            --fulcio-url="$FULCIO_URL"
+            --identity-token="$IDENTITY_TOKEN"
+            --bundle=manifest.bundle.json
+          )
+          if [[ "$STAGING" == "true" ]]; then
+            arguments+=(--insecure-skip-verify)
+          fi
+          cosign sign-blob "${arguments[@]}" manifest.json
+
+      - name: Validate release evidence sizes
+        run: |
+          for file in manifest.json manifest.bundle.json; do
+            bytes=$(wc -c < "$file")
+            ((bytes > 0 && bytes <= 32 * 1024))
+          done
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_RELEASE_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      - name: Publish the immutable release
+        run: |
+          set -euo pipefail
+          archive="confer-worker-image_${RELEASE_VERSION}.tar.gz"
+          object_prefix="worker-images/${RELEASE_VERSION}"
+          access_token="$(gcloud auth print-access-token)"
+
+          upload() {
+            local file=$1
+            local content_type=$2
+            local content_md5
+            content_md5=$(openssl dgst -md5 -binary "$file" | openssl base64 -A)
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --request PUT \
+              --upload-file "$file" \
+              --header "Authorization: Bearer ${access_token}" \
+              --header "Content-MD5: ${content_md5}" \
+              --header "Content-Type: ${content_type}" \
+              --header "x-goog-if-generation-match: 0" \
+              "https://storage.googleapis.com/confer-worker-image/${object_prefix}/${file}"
+          }
+
+          upload "$archive" application/gzip
+          upload manifest.json application/json
+          upload manifest.bundle.json application/json
+          upload SHA256SUMS text/plain

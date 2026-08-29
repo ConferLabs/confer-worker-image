@@ -1,0 +1,636 @@
+#!/usr/bin/python3
+
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+import struct
+import subprocess
+import sys
+import tempfile
+import zlib
+
+
+ESP_TYPE = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+GPT_HEADER_BYTES = 92
+MAXIMUM_GPT_ENTRIES_BYTES = 16 * 1024 * 1024
+MAXIMUM_PE_SECTIONS = 96
+SHA384_BYTES = 48
+
+AMD64_MACHINE = 0x8664
+EFI_APPLICATION_SUBSYSTEM = 10
+MAXIMUM_PE_DATA_DIRECTORIES = 16
+PE32_PLUS_MAGIC = 0x20b
+PE32_PLUS_HEADER_BYTES = 112
+PE_SECTION_HEADER_BYTES = 40
+SECURITY_DIRECTORY_INDEX = 4
+PLATFORM_PROFILE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "release/gcp-tdx-platform-profile.json")
+
+# The transcript is pinned to EDK2 commit 0f3867fa6ef0553e26c42f7d71ff6bdb98429742:
+# SecurityPkg/Library/DxeTpm2MeasureBootLib/DxeTpm2MeasureBootLib.c and
+# OvmfPkg/Tcg/TdTcg2Dxe/MeasureBootPeCoff.c. PE validation follows
+# MdePkg/Library/BasePeCoffLib/BasePeCoff.c at the same commit.
+
+
+class ReleaseMeasurementError(Exception):
+  pass
+
+
+@dataclass(frozen=True)
+class PeSection:
+  name: bytes
+  virtual_size: int
+  virtual_address: int
+  raw_size: int
+  raw_offset: int
+
+
+@dataclass(frozen=True)
+class PeImage:
+  checksum: int
+  data_directories: int
+  number_of_directories: int
+  sections: tuple[PeSection, ...]
+  size_of_headers: int
+
+
+def reject_duplicate_fields(
+    pairs: list[tuple[str, object]]) -> dict[str, object]:
+  result = {}
+  for key, value in pairs:
+    if key in result:
+      raise ReleaseMeasurementError(
+          "GCP TDX platform profile has duplicate fields")
+    result[key] = value
+  return result
+
+
+def require_exact_keys(value      : object,
+                       expected   : set[str],
+                       description: str) -> dict:
+  if not isinstance(value, dict) or set(value) != expected:
+    raise ReleaseMeasurementError(f"{description} fields are invalid")
+  return value
+
+
+def decode_hex(value      : object,
+               bytes_count: int,
+               description: str) -> bytes:
+  if (not isinstance(value, str)
+      or len(value) != bytes_count * 2
+      or value.lower() != value):
+    raise ReleaseMeasurementError(f"{description} is not canonical hex")
+  try:
+    decoded = bytes.fromhex(value)
+  except ValueError as error:
+    raise ReleaseMeasurementError(
+        f"{description} is not canonical hex") from error
+  if len(decoded) != bytes_count:
+    raise ReleaseMeasurementError(f"{description} is not canonical hex")
+  return decoded
+
+
+def load_platform_profile(path: Path = PLATFORM_PROFILE_PATH) -> dict:
+  try:
+    profile = json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=reject_duplicate_fields)
+  except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    raise ReleaseMeasurementError(
+        "GCP TDX platform profile is invalid") from error
+
+  profile = require_exact_keys(
+      profile,
+      {"version", "mrtd", "rtmr0Fixture"},
+      "GCP TDX platform profile")
+  if type(profile["version"]) is not int or profile["version"] != 1:
+    raise ReleaseMeasurementError(
+        "GCP TDX platform profile version is invalid")
+  decode_hex(profile["mrtd"], SHA384_BYTES, "MRTD")
+
+  fixture = require_exact_keys(
+      profile["rtmr0Fixture"],
+      {"platform", "events"},
+      "RTMR0 fixture")
+  platform = require_exact_keys(
+      fixture["platform"],
+      {
+          "provider",
+          "region",
+          "machineType",
+          "confidentialInstanceType",
+          "shieldedInstanceConfig",
+      },
+      "RTMR0 platform")
+  shielded = require_exact_keys(
+      platform["shieldedInstanceConfig"],
+      {"secureBoot", "virtualTpm", "integrityMonitoring"},
+      "RTMR0 Shielded VM configuration")
+  if (not all(isinstance(platform[key], str) and platform[key]
+              for key in [
+                  "provider",
+                  "region",
+                  "machineType",
+                  "confidentialInstanceType",
+              ])
+      or not all(type(value) is bool for value in shielded.values())):
+    raise ReleaseMeasurementError(
+        "RTMR0 platform configuration is invalid")
+
+  events = fixture["events"]
+  if not isinstance(events, list) or not events:
+    raise ReleaseMeasurementError("RTMR0 fixture events are invalid")
+  rtmr0 = bytes(SHA384_BYTES)
+  for event in events:
+    event = require_exact_keys(
+        event,
+        {"type", "description", "digest"},
+        "RTMR0 fixture event")
+    if (type(event["type"]) is not int
+        or event["type"] < 0
+        or event["type"] > 0xffffffff):
+      raise ReleaseMeasurementError("RTMR0 fixture event type is invalid")
+    if not isinstance(event["description"], str) or not event["description"]:
+      raise ReleaseMeasurementError(
+          "RTMR0 fixture event description is invalid")
+    rtmr0 = hashlib.sha384(
+        rtmr0
+        + decode_hex(
+            event["digest"],
+            SHA384_BYTES,
+            "RTMR0 fixture event digest")
+    ).digest()
+  return profile | {"rtmr0": rtmr0.hex()}
+
+
+def run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+  try:
+    return subprocess.run(
+        command,
+        check=True,
+        capture_output=True)
+  except FileNotFoundError as error:
+    raise ReleaseMeasurementError(
+        f"Required command is unavailable: {command[0]}") from error
+  except subprocess.CalledProcessError as error:
+    message = error.stderr.decode("utf-8", errors="replace").strip()
+    if not message:
+      message = f"{command[0]} failed"
+    raise ReleaseMeasurementError(message) from error
+
+
+def read_at(image: Path, offset: int, length: int) -> bytes:
+  image_bytes = image.stat().st_size
+  if offset < 0 or length < 0 or offset + length > image_bytes:
+    raise ReleaseMeasurementError("Worker GPT exceeds the disk image")
+  with image.open("rb") as source:
+    source.seek(offset)
+    value = source.read(length)
+  if len(value) != length:
+    raise ReleaseMeasurementError("Worker disk ended unexpectedly")
+  return value
+
+
+def get_partition_table(image: Path) -> dict:
+  try:
+    document = json.loads(run(["sfdisk", "--json", str(image)]).stdout)
+    partition_table = document["partitiontable"]
+  except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+    raise ReleaseMeasurementError(
+        "Worker disk partition table is invalid") from error
+  if (not isinstance(partition_table, dict)
+      or partition_table.get("label") != "gpt"
+      or partition_table.get("unit") != "sectors"):
+    raise ReleaseMeasurementError(
+        "Worker disk is not a sector-addressed GPT image")
+  return partition_table
+
+
+def get_sector_size(partition_table: dict) -> int:
+  sector_size = partition_table.get("sectorsize")
+  if type(sector_size) is not int or sector_size < 512:
+    raise ReleaseMeasurementError("Worker disk sector size is invalid")
+  return sector_size
+
+
+def get_esp_offset(image: Path, partition_table: dict) -> int:
+  partitions = partition_table.get("partitions")
+  if not isinstance(partitions, list):
+    raise ReleaseMeasurementError("Worker disk partitions are invalid")
+  esp = [
+      partition
+      for partition in partitions
+      if isinstance(partition, dict)
+      and str(partition.get("type", "")).upper() == ESP_TYPE
+  ]
+  if len(esp) != 1:
+    raise ReleaseMeasurementError(
+        f"Expected one EFI System Partition, found {len(esp)}")
+
+  start = esp[0].get("start")
+  size = esp[0].get("size")
+  sector_size = get_sector_size(partition_table)
+  if (type(start) is not int or type(size) is not int
+      or start < 2 or size <= 0):
+    raise ReleaseMeasurementError("EFI System Partition location is invalid")
+  offset = start * sector_size
+  if offset + size * sector_size > image.stat().st_size:
+    raise ReleaseMeasurementError(
+        "EFI System Partition exceeds the disk image")
+  return offset
+
+
+def get_gpt_event_data(image: Path, sector_size: int) -> bytes:
+  header_sector = read_at(image, sector_size, sector_size)
+  if header_sector[:8] != b"EFI PART":
+    raise ReleaseMeasurementError("Worker disk has no primary GPT header")
+
+  revision, header_size, header_crc = struct.unpack_from(
+      "<III", header_sector, 8)
+  current_lba, backup_lba, first_usable_lba = struct.unpack_from(
+      "<QQQ", header_sector, 24)
+  entries_lba = struct.unpack_from("<Q", header_sector, 72)[0]
+  entry_count, entry_size, entries_crc = struct.unpack_from(
+      "<III", header_sector, 80)
+  image_bytes = image.stat().st_size
+  if image_bytes % sector_size != 0:
+    raise ReleaseMeasurementError(
+        "Worker disk is not aligned to its sector size")
+  total_sectors = image_bytes // sector_size
+  if (revision != 0x00010000
+      or header_size != GPT_HEADER_BYTES
+      or current_lba != 1
+      or backup_lba >= total_sectors
+      or entries_lba < 2
+      or first_usable_lba <= entries_lba
+      or entry_count == 0
+      or entry_size < 128
+      or (entry_size & (entry_size - 1)) != 0):
+    raise ReleaseMeasurementError("Worker primary GPT header is unsupported")
+
+  header = header_sector[:header_size]
+  header_for_crc = bytearray(header)
+  header_for_crc[16:20] = bytes(4)
+  if zlib.crc32(header_for_crc) & 0xffffffff != header_crc:
+    raise ReleaseMeasurementError(
+        "Worker primary GPT header checksum is invalid")
+
+  entries_bytes = entry_count * entry_size
+  if entries_bytes > MAXIMUM_GPT_ENTRIES_BYTES:
+    raise ReleaseMeasurementError(
+        "Worker GPT partition array is too large")
+  entries = read_at(image, entries_lba * sector_size, entries_bytes)
+  if zlib.crc32(entries) & 0xffffffff != entries_crc:
+    raise ReleaseMeasurementError(
+        "Worker GPT partition array checksum is invalid")
+
+  valid_entries = [
+      entries[offset:offset + entry_size]
+      for offset in range(0, len(entries), entry_size)
+      if entries[offset:offset + 16] != bytes(16)
+  ]
+  return (
+      header
+      + struct.pack("<Q", len(valid_entries))
+      + b"".join(valid_entries)
+  )
+
+
+def copy_uki(image: Path, esp_offset: int, destination: Path) -> None:
+  run([
+      "mcopy",
+      "-i", f"{image}@@{esp_offset}",
+      "::/EFI/BOOT/BOOTX64.EFI",
+      str(destination),
+  ])
+  if not destination.is_file() or destination.stat().st_size == 0:
+    raise ReleaseMeasurementError("EFI fallback UKI is missing or empty")
+
+
+def read_pe_unsigned(image            : bytes,
+                     offset           : int,
+                     length           : int,
+                     image_description: str,
+                     field_description: str) -> int:
+  end = offset + length
+  if offset < 0 or length <= 0 or end > len(image):
+    raise ReleaseMeasurementError(
+        f"{image_description} {field_description} is outside the image")
+  return int.from_bytes(image[offset:end], "little")
+
+
+def parse_pe_image(image: bytes, description: str) -> PeImage:
+  if len(image) < 64 or image[:2] != b"MZ":
+    raise ReleaseMeasurementError(f"{description} DOS header is invalid")
+
+  pe_offset = read_pe_unsigned(
+      image,
+      0x3c,
+      4,
+      description,
+      "PE header offset")
+  if image[pe_offset:pe_offset + 4] != b"PE\0\0":
+    raise ReleaseMeasurementError(f"{description} PE signature is invalid")
+
+  file_header = pe_offset + 4
+  machine = read_pe_unsigned(
+      image,
+      file_header,
+      2,
+      description,
+      "machine type")
+  section_count = read_pe_unsigned(
+      image,
+      file_header + 2,
+      2,
+      description,
+      "section count")
+  optional_header_size = read_pe_unsigned(
+      image,
+      file_header + 16,
+      2,
+      description,
+      "optional header size")
+  optional_header = file_header + 20
+  optional_header_end = optional_header + optional_header_size
+  if (optional_header_size < PE32_PLUS_HEADER_BYTES
+      or optional_header_end > len(image)):
+    raise ReleaseMeasurementError(
+        f"{description} optional header is outside the image")
+
+  magic = read_pe_unsigned(
+      image,
+      optional_header,
+      2,
+      description,
+      "optional header magic")
+  subsystem = read_pe_unsigned(
+      image,
+      optional_header + 68,
+      2,
+      description,
+      "subsystem")
+  if (machine != AMD64_MACHINE
+      or magic != PE32_PLUS_MAGIC
+      or subsystem != EFI_APPLICATION_SUBSYSTEM):
+    raise ReleaseMeasurementError(
+        f"{description} is not an x86-64 EFI application")
+  if section_count == 0 or section_count > MAXIMUM_PE_SECTIONS:
+    raise ReleaseMeasurementError(f"{description} section count is invalid")
+
+  size_of_headers = read_pe_unsigned(
+      image,
+      optional_header + 60,
+      4,
+      description,
+      "header size")
+  size_of_image = read_pe_unsigned(
+      image,
+      optional_header + 56,
+      4,
+      description,
+      "image size")
+  checksum = optional_header + 64
+  number_of_directories = read_pe_unsigned(
+      image,
+      optional_header + 108,
+      4,
+      description,
+      "data directory count")
+  data_directories = optional_header + 112
+  if (number_of_directories > MAXIMUM_PE_DATA_DIRECTORIES
+      or data_directories + number_of_directories * 8
+      != optional_header_end):
+    raise ReleaseMeasurementError(
+        f"{description} optional header layout is invalid")
+
+  section_table = optional_header_end
+  section_table_end = section_table + section_count * PE_SECTION_HEADER_BYTES
+  if (checksum + 4 > size_of_headers
+      or section_table_end > size_of_headers
+      or size_of_headers >= size_of_image
+      or size_of_image <= section_table_end
+      or size_of_headers > len(image)):
+    raise ReleaseMeasurementError(f"{description} headers are invalid")
+
+  sections = []
+  for index in range(section_count):
+    section = section_table + index * PE_SECTION_HEADER_BYTES
+    name = image[section:section + 8]
+    virtual_size = read_pe_unsigned(
+        image,
+        section + 8,
+        4,
+        description,
+        "section virtual size")
+    virtual_address = read_pe_unsigned(
+        image,
+        section + 12,
+        4,
+        description,
+        "section virtual address")
+    raw_size = read_pe_unsigned(
+        image,
+        section + 16,
+        4,
+        description,
+        "section raw size")
+    raw_offset = read_pe_unsigned(
+        image,
+        section + 20,
+        4,
+        description,
+        "section raw offset")
+    if (raw_size != 0
+        and (virtual_address < size_of_headers
+             or raw_offset < size_of_headers
+             or raw_offset + raw_size > len(image))):
+      raise ReleaseMeasurementError(
+          f"{description} section is outside the image")
+    sections.append(PeSection(
+        name,
+        virtual_size,
+        virtual_address,
+        raw_size,
+        raw_offset))
+
+  return PeImage(
+      checksum,
+      data_directories,
+      number_of_directories,
+      tuple(sections),
+      size_of_headers)
+
+
+def calculate_authenticode_digest(image: bytes, description: str) -> bytes:
+  pe = parse_pe_image(image, description)
+
+  # Mirror MeasurePeImageAndExtend steps 3-17. EDK2 finalizes immediately after
+  # hashing the exact physical trailing bytes; it adds no alignment padding.
+  hasher = hashlib.sha384()
+  hasher.update(image[:pe.checksum])
+  certificate_size = 0
+  if pe.number_of_directories <= SECURITY_DIRECTORY_INDEX:
+    hasher.update(image[pe.checksum + 4:pe.size_of_headers])
+  else:
+    security_directory = (
+        pe.data_directories + SECURITY_DIRECTORY_INDEX * 8)
+    if security_directory + 8 > pe.size_of_headers:
+      raise ReleaseMeasurementError(
+          f"{description} security directory is invalid")
+    hasher.update(image[pe.checksum + 4:security_directory])
+    hasher.update(image[security_directory + 8:pe.size_of_headers])
+
+    certificate_address = read_pe_unsigned(
+        image,
+        security_directory,
+        4,
+        description,
+        "certificate address")
+    certificate_size = read_pe_unsigned(
+        image,
+        security_directory + 4,
+        4,
+        description,
+        "certificate size")
+    if ((certificate_address == 0) != (certificate_size == 0)
+        or (certificate_size != 0
+            and certificate_address + certificate_size != len(image))):
+      raise ReleaseMeasurementError(
+          f"{description} certificate table is invalid")
+
+  sections = [
+      (section.raw_offset, section.raw_size)
+      for section in pe.sections
+      if section.raw_size != 0
+  ]
+
+  bytes_hashed = pe.size_of_headers
+  previous_section_end = pe.size_of_headers
+  for offset, size in sorted(sections):
+    if offset < previous_section_end:
+      raise ReleaseMeasurementError(
+          f"{description} raw sections overlap")
+    hasher.update(image[offset:offset + size])
+    bytes_hashed += size
+    previous_section_end = offset + size
+
+  if bytes_hashed + certificate_size > len(image):
+    raise ReleaseMeasurementError(
+        f"{description} hashed regions exceed the image")
+  trailing_bytes = len(image) - certificate_size - bytes_hashed
+  if trailing_bytes != 0:
+    hasher.update(image[bytes_hashed:bytes_hashed + trailing_bytes])
+  return hasher.digest()
+
+
+def extract_embedded_linux_image(uki: bytes) -> bytes:
+  pe = parse_pe_image(uki, "EFI fallback UKI")
+  sections = [
+      section
+      for section in pe.sections
+      if section.name.rstrip(b"\0") == b".linux"
+  ]
+  if len(sections) != 1:
+    raise ReleaseMeasurementError(
+        f"Expected one EFI fallback UKI .linux section, found {len(sections)}")
+  section = sections[0]
+  if (section.virtual_size == 0
+      or section.virtual_size > section.raw_size):
+    raise ReleaseMeasurementError(
+        "EFI fallback UKI .linux section size is invalid")
+  return uki[
+      section.raw_offset:section.raw_offset + section.virtual_size]
+
+
+def get_efi_application_digests(uki: Path) -> tuple[bytes, bytes]:
+  uki_image = uki.read_bytes()
+  uki_digest = calculate_authenticode_digest(
+      uki_image,
+      "EFI fallback UKI")
+  linux_image = extract_embedded_linux_image(uki_image)
+  linux_digest = calculate_authenticode_digest(
+      linux_image,
+      "Embedded .linux EFI application")
+  return uki_digest, linux_digest
+
+
+def extend(register: bytes, event_digest: bytes) -> bytes:
+  if len(register) != SHA384_BYTES or len(event_digest) != SHA384_BYTES:
+    raise ReleaseMeasurementError("RTMR extension is not SHA-384")
+  return hashlib.sha384(register + event_digest).digest()
+
+
+def hash_and_extend(register: bytes, event: bytes) -> bytes:
+  return extend(register, hashlib.sha384(event).digest())
+
+
+def calculate_measurements(gpt_event_digest: bytes,
+                           uki_authenticode_digest: bytes,
+                           linux_authenticode_digest: bytes,
+                           platform_profile_path: Path = PLATFORM_PROFILE_PATH
+                           ) -> dict[str, str]:
+  # The pinned EDK2 TDVF source emits this transcript for the first successful
+  # disk boot:
+  # OnReadyToBoot action, separator, GPT, fallback UKI, embedded Linux EFI
+  # application, and the two OnExitBootServices actions. RTMR extends are
+  # SHA384(old || event_digest).
+  rtmr1 = bytes(SHA384_BYTES)
+  rtmr1 = hash_and_extend(
+      rtmr1,
+      b"Calling EFI Application from Boot Option")
+  rtmr1 = hash_and_extend(rtmr1, bytes(4))
+  rtmr1 = extend(rtmr1, gpt_event_digest)
+  rtmr1 = extend(rtmr1, uki_authenticode_digest)
+  rtmr1 = extend(rtmr1, linux_authenticode_digest)
+  rtmr1 = hash_and_extend(rtmr1, b"Exit Boot Services Invocation")
+  rtmr1 = hash_and_extend(
+      rtmr1,
+      b"Exit Boot Services Returned with Success")
+  platform_profile = load_platform_profile(platform_profile_path)
+  return {
+      "mrtd": platform_profile["mrtd"],
+      "rtmr0": platform_profile["rtmr0"],
+      "rtmr1": rtmr1.hex(),
+      "rtmr2": bytes(SHA384_BYTES).hex(),
+  }
+
+
+def measure_image(image: Path) -> dict[str, str]:
+  if image.is_symlink() or not image.is_file():
+    raise ReleaseMeasurementError(f"Disk image does not exist: {image}")
+  partition_table = get_partition_table(image)
+  sector_size = get_sector_size(partition_table)
+  esp_offset = get_esp_offset(image, partition_table)
+  gpt_event_digest = hashlib.sha384(
+      get_gpt_event_data(image, sector_size)).digest()
+
+  with tempfile.TemporaryDirectory() as directory:
+    uki = Path(directory) / "BOOTX64.EFI"
+    copy_uki(image, esp_offset, uki)
+    uki_digest, linux_digest = get_efi_application_digests(uki)
+  return calculate_measurements(
+      gpt_event_digest,
+      uki_digest,
+      linux_digest)
+
+
+def main(arguments: list[str]) -> int:
+  if len(arguments) != 1:
+    sys.stderr.write(f"Usage: {Path(sys.argv[0]).name} DISK_IMAGE\n")
+    return 2
+  try:
+    measurements = measure_image(Path(arguments[0]))
+  except (ReleaseMeasurementError, OSError, ValueError) as error:
+    sys.stderr.write(f"{error}\n")
+    return 1
+  sys.stdout.write(
+      json.dumps(measurements, separators=(",", ":"), sort_keys=True)
+      + "\n")
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main(sys.argv[1:]))

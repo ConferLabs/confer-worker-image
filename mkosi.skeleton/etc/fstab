@@ -1,0 +1,3 @@
+tmpfs  /tmp                    tmpfs  mode=1777,strictatime,nosuid,nodev,size=2G  0 0
+tmpfs  /var/log                tmpfs  mode=0755,strictatime,nosuid,nodev,size=256M  0 0
+tmpfs  /var/lib/confer         tmpfs  mode=0711,strictatime,nosuid,nodev,size=8G  0 0

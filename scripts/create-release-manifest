@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+
+if (($# != 2)); then
+  echo "Usage: $0 IMAGE_VERSION ARCHIVE_SHA256" >&2
+  exit 1
+fi
+
+image_version=$1
+archive_sha256=$2
+measurements=$(/bin/cat)
+
+if [[ ! "$image_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+  echo "Image version is invalid" >&2
+  exit 1
+fi
+if [[ ! "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Archive digest must be canonical SHA-256" >&2
+  exit 1
+fi
+jq -e '
+  type == "object"
+  and keys == ["mrtd", "rtmr0", "rtmr1", "rtmr2"]
+  and all(.[]; type == "string" and test("^[0-9a-f]{96}$"))
+' <<< "$measurements" > /dev/null
+
+jq \
+  --null-input \
+  --compact-output \
+  --sort-keys \
+  --arg artifactType "confer-worker-image" \
+  --arg archiveSha256 "$archive_sha256" \
+  --arg imageVersion "$image_version" \
+  --argjson tdxMeasurements "$measurements" \
+  '{
+    artifactType: $artifactType,
+    archiveSha256: $archiveSha256,
+    version: 1,
+    imageVersion: $imageVersion,
+    tdxMeasurements: $tdxMeasurements
+  }'
