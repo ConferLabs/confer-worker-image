@@ -152,3 +152,4 @@ jobs:
           upload manifest.json application/json
           upload manifest.bundle.json application/json
           upload SHA256SUMS text/plain
+
