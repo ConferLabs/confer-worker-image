@@ -181,7 +181,7 @@ class ImageContractTest(unittest.TestCase):
     self.assertIn("https://fulcio.sigstage.dev", workflow)
     self.assertIn("https://fulcio.sigstore.dev", workflow)
     self.assertIn(
-        "worker-image-releases@conferlabs.iam.gserviceaccount.com",
+        "worker-releases@conferlabs.iam.gserviceaccount.com",
         workflow)
     self.assertIn("cosign sign-blob", workflow)
     self.assertIn("x-goog-if-generation-match: 0", workflow)

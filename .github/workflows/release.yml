@@ -87,7 +87,7 @@ jobs:
           export_environment_variables: false
           id_token_audience: sigstore
           id_token_include_email: true
-          service_account: worker-image-releases@conferlabs.iam.gserviceaccount.com
+          service_account: worker-releases@conferlabs.iam.gserviceaccount.com
           token_format: id_token
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
 
@@ -115,6 +115,26 @@ jobs:
             bytes=$(wc -c < "$file")
             ((bytes > 0 && bytes <= 32 * 1024))
           done
+
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Publish the signed manifest by digest
+        run: |
+          set -euo pipefail
+          key="manifests/$(sha256sum manifest.json | cut -d' ' -f1).json"
+          if ! aws s3api head-object --bucket confer-artifacts --key "$key" > /dev/null 2>&1; then
+            aws s3api put-object \
+              --bucket confer-artifacts \
+              --key "$key" \
+              --body manifest.json \
+              --content-type application/json \
+              --if-none-match '*' \
+              > /dev/null
+          fi
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
@@ -152,4 +172,26 @@ jobs:
           upload manifest.json application/json
           upload manifest.bundle.json application/json
           upload SHA256SUMS text/plain
+
+      - name: Mirror the release evidence
+        run: |
+          set -euo pipefail
+          object_prefix="worker-images/${RELEASE_VERSION}"
+
+          mirror() {
+            local file=$1
+            local key=$2
+            local content_type=$3
+            aws s3api put-object \
+              --bucket confer-artifacts \
+              --key "$key" \
+              --body "$file" \
+              --content-type "$content_type" \
+              --if-none-match '*' \
+              > /dev/null
+          }
+
+          mirror manifest.json "${object_prefix}/manifest.json" application/json
+          mirror manifest.bundle.json "${object_prefix}/manifest.bundle.json" application/json
+          mirror SHA256SUMS "${object_prefix}/SHA256SUMS" text/plain
 

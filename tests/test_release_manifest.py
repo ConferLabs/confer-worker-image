@@ -11,7 +11,6 @@ CREATE_MANIFEST = REPOSITORY_ROOT / "scripts/create-release-manifest"
 class ReleaseManifestTest(unittest.TestCase):
   def setUp(self):
     self.image_version = "1.2.3-RC1"
-    self.archive_sha256 = "a" * 64
     self.mrtd = "d" * 96
     self.rtmr0 = "c" * 96
     self.rtmr1 = "b" * 96
@@ -22,7 +21,6 @@ class ReleaseManifestTest(unittest.TestCase):
         [
             CREATE_MANIFEST,
             self.image_version,
-            self.archive_sha256,
         ],
         check=False,
         capture_output=True,
@@ -40,7 +38,6 @@ class ReleaseManifestTest(unittest.TestCase):
     self.assertEqual(result.returncode, 0, result.stderr)
     expected = {
         "artifactType": "confer-worker-image",
-        "archiveSha256": self.archive_sha256,
         "imageVersion": self.image_version,
         "tdxMeasurements": {
             "mrtd": self.mrtd,
@@ -56,25 +53,16 @@ class ReleaseManifestTest(unittest.TestCase):
 
   def test_rejects_noncanonical_fields(self):
     invalid = [
-        ("image version", "1.2", "a" * 64, self.mrtd, self.rtmr0,
-         "b" * 96, "0" * 96),
-        ("archive uppercase", "1.2.3", "A" * 64, self.mrtd, self.rtmr0,
-         "b" * 96, "0" * 96),
-        ("archive short", "1.2.3", "a" * 63, self.mrtd, self.rtmr0,
-         "b" * 96, "0" * 96),
-        ("MRTD uppercase", "1.2.3", "a" * 64, self.mrtd.upper(),
-         self.rtmr0, "b" * 96, "0" * 96),
-        ("RTMR uppercase", "1.2.3", "a" * 64, self.mrtd, self.rtmr0,
-         "B" * 96, "0" * 96),
-        ("RTMR short", "1.2.3", "a" * 64, self.mrtd, self.rtmr0,
-         "b" * 95, "0" * 96),
+        ("image version", "1.2", self.mrtd, self.rtmr0, "b" * 96, "0" * 96),
+        ("MRTD uppercase", "1.2.3", self.mrtd.upper(), self.rtmr0, "b" * 96,
+         "0" * 96),
+        ("RTMR uppercase", "1.2.3", self.mrtd, self.rtmr0, "B" * 96, "0" * 96),
+        ("RTMR short", "1.2.3", self.mrtd, self.rtmr0, "b" * 95, "0" * 96),
     ]
 
-    for (name, image_version, archive_sha256, mrtd, rtmr0, rtmr1,
-         rtmr2) in invalid:
+    for name, image_version, mrtd, rtmr0, rtmr1, rtmr2 in invalid:
       with self.subTest(name=name):
         self.image_version = image_version
-        self.archive_sha256 = archive_sha256
         self.mrtd = mrtd
         self.rtmr0 = rtmr0
         self.rtmr1 = rtmr1

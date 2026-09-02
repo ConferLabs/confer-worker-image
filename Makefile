@@ -60,7 +60,7 @@ gcp-archive: validate-gcp-image
 prepare-release: gcp-archive
 	sha256sum $(GCP_ARCHIVE) > SHA256SUMS
 	scripts/measure-release-image $(RAW_IMAGE) \
-		| scripts/create-release-manifest $(IMAGE_VERSION) "$$(cut -d' ' -f1 SHA256SUMS)" \
+		| scripts/create-release-manifest $(IMAGE_VERSION) \
 		> manifest.json
 
 clean:
