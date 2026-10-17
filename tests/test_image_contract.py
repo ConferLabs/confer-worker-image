@@ -28,12 +28,14 @@ class ImageContractTest(unittest.TestCase):
         "ExecStopPost=-/bin/rm -f /run/confer/ready",
         "Restart=no",
         "RefuseManualStart=yes",
+        "SuccessAction=poweroff-force",
+        "FailureAction=poweroff-force",
         "KillMode=control-group",
         "NoNewPrivileges=yes",
         "AmbientCapabilities=CAP_SETUID",
         "ProtectSystem=strict",
         "ProtectProc=invisible",
-        "ReadWritePaths=/run/confer /var/lib/confer/workspace /sys/kernel/config/tsm/report",
+        "ReadWritePaths=/run/confer /var/lib/confer/workspace /sys/kernel/config/tsm/report /sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384",
     }.issubset(service))
 
     ssh = set(directives("mkosi.skeleton/etc/ssh/sshd_config"))
@@ -43,7 +45,7 @@ class ImageContractTest(unittest.TestCase):
         "AuthenticationMethods publickey",
         "AllowUsers confer-job",
         "DisableForwarding yes",
-        "MaxSessions 1",
+        "MaxSessions 32",
         "PermitTTY no",
         "UsePAM no",
     }.issubset(ssh))
@@ -64,6 +66,42 @@ class ImageContractTest(unittest.TestCase):
         "StandardOutput=socket",
         "RuntimeMaxSec=5s",
     }.issubset(service))
+
+  def test_document_worker_is_sandboxed_per_connection(self):
+    socket_unit = set(directives(
+        "mkosi.skeleton/etc/systemd/system/confer-document-worker.socket"))
+    service = set(directives(
+        "mkosi.skeleton/etc/systemd/system/confer-document-worker@.service"))
+    slice_unit = set(directives(
+        "mkosi.skeleton/etc/systemd/system/confer-document.slice"))
+    self.assertTrue({
+        "ListenStream=/run/confer-document/worker.sock",
+        "Accept=yes",
+        "MaxConnections=32",
+        "SocketUser=confer-job",
+        "SocketMode=0600",
+    }.issubset(socket_unit))
+    self.assertTrue({
+        "Slice=confer-document.slice",
+        "Environment=OMP_THREAD_LIMIT=1",
+        "DynamicUser=yes",
+        "StandardInput=socket",
+        "StandardOutput=socket",
+        "PrivateNetwork=yes",
+        "IPAddressDeny=any",
+        "RestrictAddressFamilies=none",
+        "InaccessiblePaths=/mnt /run/confer /var/lib/confer",
+        "MemoryMax=8G",
+        "RuntimeMaxSec=5min",
+        "ExecStart=/usr/bin/python3 -S -m confer_document_worker.main",
+    }.issubset(service))
+    self.assertTrue({"MemorySwapMax=0"}.issubset(slice_unit))
+    self.assertTrue(any(line.startswith("MemoryMax=") for line in slice_unit))
+
+    postinst = read("mkosi.postinst.chroot")
+    self.assertIn('--requirement "$SRCDIR/document-worker/requirements-runtime.txt"', postinst)
+    self.assertIn("confer_document_worker.main --check", postinst)
+    self.assertIn("systemctl enable confer-document-worker.socket", postinst)
 
   def test_job_network_policy_rejects_blocked_connections(self):
     policy = set(directives(
@@ -87,6 +125,8 @@ class ImageContractTest(unittest.TestCase):
         "python3-pil",
         "python3-pypdf",
         "poppler-utils",
+        "tesseract-ocr",
+        "tesseract-ocr-eng",
         "fonts-dejavu-core",
         "fonts-liberation",
         "fonts-noto-core",
@@ -164,8 +204,8 @@ class ImageContractTest(unittest.TestCase):
     self.assertEqual(profile["version"], 1)
     self.assertEqual(profile["rtmr0Fixture"]["platform"], {
         "provider": "GCP",
-        "region": "us-central1",
-        "machineType": "c3-standard-4",
+        "region": "us-east4",
+        "machineType": "c3-standard-8",
         "confidentialInstanceType": "TDX",
         "shieldedInstanceConfig": {
             "secureBoot": False,

@@ -4,8 +4,8 @@
   "rtmr0Fixture": {
     "platform": {
       "provider": "GCP",
-      "region": "us-central1",
-      "machineType": "c3-standard-4",
+      "region": "us-east4",
+      "machineType": "c3-standard-8",
       "confidentialInstanceType": "TDX",
       "shieldedInstanceConfig": {
         "secureBoot": false,
@@ -17,7 +17,7 @@
       {
         "type": 2147483659,
         "description": "TD HOB",
-        "digest": "d587edd195019c7d650a7f6d2df37275e2fb2250d21770f02c4df72457b74dcd659d9974f645d708446ca9af192593b4"
+        "digest": "39e89cd8ec6f35e35e86a9b2f9b6b4bdf0e71abc8bcb67f9ba48f37f511d865e909dca970cf364f926b2738435d41341"
       },
       {
         "type": 2147483658,
@@ -57,17 +57,17 @@
       {
         "type": 10,
         "description": "ACPI data 1",
-        "digest": "f60c35e53bb21b4675cfa8db310ec88e38cd369d8d463acdde815122fa8b893b8896a5783b538856693ed7645ddb897e"
+        "digest": "4f05c33562742acf0a28bf864a5eb00f6f2478ee1971b87d3688f3071a537cbab66f6ce4825deb02ed1aa0e83f0493f5"
       },
       {
         "type": 10,
         "description": "ACPI data 2",
-        "digest": "509dcfe10beb5d470c40f25e30895370948831b9cf79db15d977e7bba8eb42f7200212071ad8b19d6011759779eced5a"
+        "digest": "4274fedfa6abefe0062c5734ff82cd2c9092cdb51134ec4762d5c802d743316c9f0cdaa497a843811d0d5620cc252562"
       },
       {
         "type": 10,
         "description": "ACPI data 3",
-        "digest": "0bb0afa008873bdc20dee0f741da7896c2bfeee94ae52e9bdbf94bc87c32d04a4b1f1d824490f1dae574ff6d4e4bb0b3"
+        "digest": "89b98ddbff5c9ab5dc70f3e84330219709e867f8ab8e0376bfeec2a6927d2ad50f9664f5b9a8f5d45a2673f8a92722d0"
       },
       {
         "type": 2147483650,

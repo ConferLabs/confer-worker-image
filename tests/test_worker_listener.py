@@ -34,6 +34,21 @@ def load_listener():
   return module
 
 
+class FakeRegister:
+  """An RTMR: zero at boot, extended as SHA-384(value || digest)."""
+
+  def __init__(self, value: bytes = bytes(48)):
+    self.value = value
+    self.extensions = []
+
+  def extend(self, path: Path, digest: bytes) -> None:
+    self.extensions.append(digest)
+    self.value = hashlib.sha384(self.value + digest).digest()
+
+  def read(self, path: Path) -> bytes:
+    return self.value
+
+
 def create_ed25519_key(seed: int = 0) -> bytes:
   return ED25519_KEY_PREFIX + bytes(
       (seed + index) % 256 for index in range(32))
@@ -87,15 +102,28 @@ class WorkerListenerTest(unittest.TestCase):
       manifest_path.write_text(manifest, encoding="utf-8")
       bundle_path.write_text(bundle, encoding="utf-8")
 
+      register = FakeRegister()
+      reservation = hashlib.sha384(
+          self.listener.RESERVATION_DOMAIN
+          + host_key
+          + client_key
+          + challenge).digest()
+
+      def quote_after_reservation(report_data: bytes) -> bytes:
+        self.assertEqual(register.extensions, [reservation])
+        return b"tdx-quote"
+
       with (
           patch.object(self.listener, "HOST_KEY_PATH", host_key_path),
           patch.object(self.listener, "AUTHORIZED_KEYS_PATH", authorized_keys_path),
           patch.object(self.listener, "MANIFEST_PATH", manifest_path),
           patch.object(self.listener, "MANIFEST_BUNDLE_PATH", bundle_path),
+          patch.object(self.listener, "extend_register", register.extend),
+          patch.object(self.listener, "read_register", register.read),
           patch.object(
               self.listener,
               "create_quote",
-              return_value=b"tdx-quote") as create_quote,
+              side_effect=quote_after_reservation) as create_quote,
       ):
         previous_umask = os.umask(0o077)
         try:
@@ -112,6 +140,9 @@ class WorkerListenerTest(unittest.TestCase):
           + challenge).digest()
       create_quote.assert_called_once_with(expected_report_data)
       self.assertEqual(
+          register.value,
+          hashlib.sha384(bytes(48) + reservation).digest())
+      self.assertEqual(
           authorized_keys_path.read_text(encoding="ascii"),
           f"restrict {format_public_key(client_key)}\n")
       self.assertEqual(stat.S_IMODE(authorized_keys_path.stat().st_mode), 0o444)
@@ -126,6 +157,55 @@ class WorkerListenerTest(unittest.TestCase):
           "manifest": manifest,
           "manifestBundle": bundle,
       })
+
+  def test_reservation_refuses_a_register_that_records_anything_earlier(self):
+    register = FakeRegister()
+    register.extend(Path("rtmr3"), hashlib.sha384(b"earlier reservation").digest())
+
+    with (
+        patch.object(self.listener, "extend_register", register.extend),
+        patch.object(self.listener, "read_register", register.read),
+    ):
+      with self.assertRaisesRegex(self.listener.WorkerError, "more than this reservation"):
+        self.listener.record_reservation(
+            create_ed25519_key(10),
+            create_ed25519_key(100),
+            bytes(range(32)))
+
+  def test_reservation_matches_the_proxy_golden_value(self):
+    register = FakeRegister()
+    with (
+        patch.object(self.listener, "extend_register", register.extend),
+        patch.object(self.listener, "read_register", register.read),
+    ):
+      self.listener.record_reservation(
+          ED25519_KEY_PREFIX + bytes([9]) * 32,
+          ED25519_KEY_PREFIX + bytes([7]) * 32,
+          bytes(range(32)))
+
+    self.assertEqual(
+        register.value.hex(),
+        "4f883dce24b9f83ba2671a5bbd1e168e3cd95562196bf782"
+        "9bed8efd1ef0b3e65c4b84b3db5609b9ee5176de0d55d6d3")
+
+  def test_register_extension_writes_one_digest_and_reads_one_value(self):
+    digest = hashlib.sha384(b"event").digest()
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "rtmr3"
+      path.write_bytes(b"")
+
+      self.listener.extend_register(path, digest)
+
+      self.assertEqual(path.read_bytes(), digest)
+      self.assertEqual(self.listener.read_register(path), digest)
+
+      with patch.object(self.listener.os, "write", return_value=10):
+        with self.assertRaisesRegex(self.listener.WorkerError, "incomplete"):
+          self.listener.extend_register(path, digest)
+
+      path.write_bytes(bytes(47))
+      with self.assertRaisesRegex(self.listener.WorkerError, "invalid"):
+        self.listener.read_register(path)
 
   def test_attestation_request_is_strict_and_bounded(self):
     challenge = self.listener.encode_urlsafe(bytes(range(32)))

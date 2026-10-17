@@ -1,0 +1,6 @@
+[Unit]
+Description=Confer Document Worker Processes
+
+[Slice]
+MemoryMax=24G
+MemorySwapMax=0

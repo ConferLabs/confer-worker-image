@@ -28,7 +28,9 @@ SetEnv PATH=/var/lib/confer/workspace/.venv/bin:/usr/local/bin:/usr/bin:/bin
 
 LoginGraceTime 60
 MaxAuthTries 2
-MaxSessions 1
+# The proxy limits how many channels it opens. sshd counts a channel until
+# its process exits, so this leaves headroom rather than mirroring that limit.
+MaxSessions 32
 ClientAliveInterval 30
 ClientAliveCountMax 3
 Compression no

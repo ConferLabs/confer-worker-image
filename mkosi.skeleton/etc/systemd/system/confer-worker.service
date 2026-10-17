@@ -4,6 +4,8 @@ RefuseManualStart=yes
 After=network-online.target nftables.service confer-worker-config.service sys-kernel-config.mount
 Wants=network-online.target
 Requires=nftables.service confer-worker-config.service sys-kernel-config.mount
+SuccessAction=poweroff-force
+FailureAction=poweroff-force
 
 [Service]
 Type=simple
@@ -38,7 +40,7 @@ ProtectKernelTunables=yes
 ProtectProc=invisible
 ProtectSystem=strict
 RemoveIPC=yes
-ReadWritePaths=/run/confer /var/lib/confer/workspace /sys/kernel/config/tsm/report
+ReadWritePaths=/run/confer /var/lib/confer/workspace /sys/kernel/config/tsm/report /sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

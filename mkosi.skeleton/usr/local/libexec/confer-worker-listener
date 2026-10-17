@@ -22,11 +22,14 @@ AUTHORIZED_KEYS_PATH  = Path("/run/confer/authorized_keys")
 MANIFEST_PATH         = Path("/run/confer/release-manifest.json")
 MANIFEST_BUNDLE_PATH  = Path("/run/confer/release-manifest.bundle.json")
 REPORTS_PATH          = Path("/sys/kernel/config/tsm/report")
+RTMR3_PATH            = Path("/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384")
 SSHD_PATH             = "/usr/sbin/sshd"
 SSHD_CONFIG           = "/etc/ssh/sshd_config"
 
 VERSION                           = 4
 REPORT_DOMAIN                     = b"confer.worker.ssh.prelude.v4"
+RESERVATION_DOMAIN                = b"confer.worker.rtmr3.reservation.v1"
+MEASUREMENT_BYTES                 = 48
 ED25519_KEY_PREFIX                = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
 ED25519_KEY_BYTES                 = len(ED25519_KEY_PREFIX) + 32
 CHALLENGE_BYTES                   = 32
@@ -285,11 +288,47 @@ def create_quote(report_data: bytes, reports_path: Path | None = None) -> bytes:
     entry.rmdir()
 
 
+def extend_register(path: Path, digest: bytes) -> None:
+  descriptor = os.open(path, os.O_WRONLY)
+  try:
+    written = os.write(descriptor, digest)
+  finally:
+    os.close(descriptor)
+  if written != len(digest):
+    raise WorkerError("RTMR3 extension was incomplete")
+
+
+def read_register(path: Path) -> bytes:
+  value = path.read_bytes()
+  if len(value) != MEASUREMENT_BYTES:
+    raise WorkerError("RTMR3 value is invalid")
+  return value
+
+
+def record_reservation(host_key_blob  : bytes,
+                       client_key_blob: bytes,
+                       challenge      : bytes,
+                       register_path  : Path | None = None) -> None:
+  """Extends RTMR3, which is zero at boot, with this reservation.
+
+  The quote then carries RTMR3 = SHA-384(zeros || event), which the client can
+  recompute from its own challenge and keys: any earlier reservation, or any
+  other extension, leaves RTMR3 at a different value.
+  """
+  if register_path is None:
+    register_path = RTMR3_PATH
+  event = hashlib.sha384(RESERVATION_DOMAIN + host_key_blob + client_key_blob + challenge).digest()
+  extend_register(register_path, event)
+  if read_register(register_path) != hashlib.sha384(bytes(MEASUREMENT_BYTES) + event).digest():
+    raise WorkerError("RTMR3 records more than this reservation")
+
+
 def create_attestation(request: bytes) -> bytes:
   challenge, client_key_blob = parse_request(request)
   write_authorized_key(AUTHORIZED_KEYS_PATH, client_key_blob)
 
   host_key, host_key_blob = read_host_key(HOST_KEY_PATH)
+  record_reservation(host_key_blob, client_key_blob, challenge)
 
   report_data = hashlib.sha512(REPORT_DOMAIN + host_key_blob + client_key_blob + challenge).digest()
 

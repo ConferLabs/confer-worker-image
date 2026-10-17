@@ -18,6 +18,20 @@ useradd \
   --require-hashes \
     --requirement /usr/local/share/confer/document-core-requirements.txt
 
+install -d -m 0755 /usr/lib/confer-document-worker
+tar -C "$SRCDIR/document-worker" --exclude=__pycache__ -cf - src \
+  | tar -C /usr/lib/confer-document-worker --no-same-owner -xf -
+/usr/bin/python3 -m pip install \
+  --no-compile \
+  --no-deps \
+  --only-binary=:all: \
+  --require-hashes \
+  --target /usr/lib/confer-document-worker/runtime \
+    --requirement "$SRCDIR/document-worker/requirements-runtime.txt"
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH=/usr/lib/confer-document-worker/runtime:/usr/lib/confer-document-worker/src \
+  /usr/bin/python3 -S -m confer_document_worker.main --check
+
 systemctl enable systemd-networkd.service
 systemctl enable systemd-networkd-wait-online.service
 systemctl enable systemd-timesyncd.service
@@ -25,6 +39,7 @@ systemctl enable nftables.service
 systemctl enable confer-worker-config.service
 systemctl enable confer-worker.service
 systemctl enable confer-worker-health.socket
+systemctl enable confer-document-worker.socket
 systemctl mask ssh.service ssh.socket
 
 truncate --size 0 /etc/machine-id

@@ -273,8 +273,8 @@ class ReleaseMeasurementTest(unittest.TestCase):
             "c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb2"
             "7469bc114cf914e9222c91618470e7f2b28ac360968270a5"),
         "rtmr0": (
-            "c49d22aff6edb37cb6178defb05e0e2b512c26960e6ee73b"
-            "1ea303365a31def807ab2ad71e5874236feca2ca552c6307"),
+            "5b56e364e22af30b3c4ef2288d08d017f437cc2f9340279a"
+            "9c2ca43a5bcb9a3bc8f6dca591a88a7f3a95d4d512779214"),
         "rtmr1": (
             "cc223af4034ff1d14ba1e937b6d822b068143fc248f357d5"
             "4be99b85552d84dc7fdb69bf9259dce6a1bf01646e4c5613"),
@@ -300,8 +300,8 @@ class ReleaseMeasurementTest(unittest.TestCase):
     profile = self.measure.load_platform_profile()
 
     self.assertEqual(profile["rtmr0"], (
-        "c49d22aff6edb37cb6178defb05e0e2b512c26960e6ee73b"
-        "1ea303365a31def807ab2ad71e5874236feca2ca552c6307"))
+        "5b56e364e22af30b3c4ef2288d08d017f437cc2f9340279a"
+        "9c2ca43a5bcb9a3bc8f6dca591a88a7f3a95d4d512779214"))
     self.assertEqual(len(profile["rtmr0Fixture"]["events"]), 14)
 
   def test_platform_profile_derives_rtmr0_from_the_fixture(self):

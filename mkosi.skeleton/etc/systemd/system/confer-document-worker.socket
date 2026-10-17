@@ -1,0 +1,18 @@
+[Unit]
+Description=Confer Document Worker Socket
+
+[Socket]
+ListenStream=/run/confer-document/worker.sock
+Accept=yes
+Backlog=16
+# The proxy limits concurrent documents; this leaves headroom for processes
+# still exiting. The slice bounds their memory.
+MaxConnections=32
+SocketUser=confer-job
+SocketGroup=confer-job
+SocketMode=0600
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

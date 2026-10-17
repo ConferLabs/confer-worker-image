@@ -1,0 +1,55 @@
+#!/usr/bin/python3 -I
+"""Relays one document worker process over this command's stdin and stdout.
+
+The proxy runs this as a constant command on an SSH exec channel. Each run
+connects to the socket-activated document worker, which starts a fresh
+sandboxed process for the connection; document bytes never appear in the
+command line.
+"""
+import os
+import socket
+import sys
+import threading
+
+SOCKET_PATH = "/run/confer-document/worker.sock"
+CHUNK_BYTES = 64 * 1024
+
+
+def relay_input(connection: socket.socket) -> None:
+  try:
+    while True:
+      chunk = os.read(0, CHUNK_BYTES)
+      if not chunk:
+        break
+      connection.sendall(chunk)
+  except OSError:
+    pass
+  finally:
+    try:
+      connection.shutdown(socket.SHUT_WR)
+    except OSError:
+      pass
+
+
+def main() -> int:
+  try:
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.connect(SOCKET_PATH)
+  except OSError as error:
+    sys.stderr.write(f"confer-document-session: {error.strerror or error}\n")
+    return 1
+
+  with connection:
+    threading.Thread(target=relay_input, args=(connection,), daemon=True).start()
+    while True:
+      chunk = connection.recv(CHUNK_BYTES)
+      if not chunk:
+        return 0
+      view = memoryview(chunk)
+      while view:
+        written = os.write(1, view)
+        view = view[written:]
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())
