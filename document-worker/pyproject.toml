@@ -9,11 +9,8 @@ description = "Sandboxed document extraction and retrieval worker for Confer"
 requires-python = ">=3.12"
 license = "AGPL-3.0-only"
 dependencies = [
-  "docling-slim[format-office,format-web]==2.112.0",
+  "docling-slim[format-office,format-web]==2.140.0",
   "PyMuPDF==1.26.7",
-  # Docling Slim 2.112 imports its PDF outline helper even when only the
-  # non-PDF backends are used, but does not declare this runtime dependency.
-  "pypdfium2==5.6.0",
   "zstandard==0.25.0",
 ]
 

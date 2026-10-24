@@ -148,7 +148,7 @@ class ImageContractTest(unittest.TestCase):
   def test_image_inputs_are_reproducible(self):
     image = set(directives("mkosi.conf"))
     self.assertTrue({
-        "Mirror=https://snapshot.ubuntu.com/ubuntu/20260209T000000Z",
+        "Mirror=https://snapshot.ubuntu.com/ubuntu/20261022T000000Z",
         "SourceDateEpoch=0",
         "Seed=01379291-3258-40cc-bb5f-57a7a9c4db2e",
         "OutputDirectory=mkosi.output",
@@ -170,7 +170,7 @@ class ImageContractTest(unittest.TestCase):
     sources = read("mkosi.skeleton/etc/apt/sources.list").splitlines()
     self.assertEqual(len(sources), 3)
     for source in sources:
-      self.assertIn("https://snapshot.ubuntu.com/ubuntu/20260209T000000Z/", source)
+      self.assertIn("https://snapshot.ubuntu.com/ubuntu/20261022T000000Z/", source)
       self.assertIn("signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg", source)
 
   def test_runtime_state_is_ephemeral(self):
