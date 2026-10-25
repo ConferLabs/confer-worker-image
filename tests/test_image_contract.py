@@ -130,6 +130,7 @@ class ImageContractTest(unittest.TestCase):
         "fonts-dejavu-core",
         "fonts-liberation",
         "fonts-noto-core",
+        "fonts-wqy-zenhei",
     }
     self.assertTrue(packages.issubset(image))
     self.assertEqual(
