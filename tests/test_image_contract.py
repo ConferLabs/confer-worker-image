@@ -205,7 +205,7 @@ class ImageContractTest(unittest.TestCase):
     self.assertEqual(profile["version"], 1)
     self.assertEqual(profile["rtmr0Fixture"]["platform"], {
         "provider": "GCP",
-        "region": "us-east4",
+        "region": "us-central1",
         "machineType": "c3-standard-8",
         "confidentialInstanceType": "TDX",
         "shieldedInstanceConfig": {

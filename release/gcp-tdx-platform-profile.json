@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "mrtd": "c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5",
+  "mrtd": "f21e6b48743fe14c2d090078ca1197f09ae4c99438677f2c79901ef80e2aeefe2f9a7eb6e3eb3b5047c4f1511731e5d3",
   "rtmr0Fixture": {
     "platform": {
       "provider": "GCP",
-      "region": "us-east4",
+      "region": "us-central1",
       "machineType": "c3-standard-8",
       "confidentialInstanceType": "TDX",
       "shieldedInstanceConfig": {
@@ -22,7 +22,7 @@
       {
         "type": 2147483658,
         "description": "configuration firmware volume",
-        "digest": "4e1221cf6f7815beec39a994bff99142ed305210e2735b1134fc8ef363923cbdcca91fa71e2e25ee8e689fb7d2c075bf"
+        "digest": "98f78a03fdbd6f31e54b65dd0518b9a043b05c700339efb71ffae8335d6d1e60395dc5b0c719d5c1ccb41af64fd88849"
       },
       {
         "type": 2147483649,
@@ -57,17 +57,17 @@
       {
         "type": 10,
         "description": "ACPI data 1",
-        "digest": "4f05c33562742acf0a28bf864a5eb00f6f2478ee1971b87d3688f3071a537cbab66f6ce4825deb02ed1aa0e83f0493f5"
+        "digest": "e828c43ec73e8bf887cd888d218257b453918c2dea7fba9c76344346d55c94f70a927ed0b342ba39bb88bdfae7226117"
       },
       {
         "type": 10,
         "description": "ACPI data 2",
-        "digest": "4274fedfa6abefe0062c5734ff82cd2c9092cdb51134ec4762d5c802d743316c9f0cdaa497a843811d0d5620cc252562"
+        "digest": "4b7f3aadcf86c3b58eb55c5a30026cdfc89db04af2b33e3e3e063c117d08b7af34cac43038da500718d89d09d81ee418"
       },
       {
         "type": 10,
         "description": "ACPI data 3",
-        "digest": "89b98ddbff5c9ab5dc70f3e84330219709e867f8ab8e0376bfeec2a6927d2ad50f9664f5b9a8f5d45a2673f8a92722d0"
+        "digest": "b3eaba03d9fc5a068e3bd3a88a4840642d65a10df4017eb6dff01e3ee469e7acd587839cc94b29a180bca1a13e6b9cfd"
       },
       {
         "type": 2147483650,
